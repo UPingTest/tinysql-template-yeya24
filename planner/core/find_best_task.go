@@ -204,6 +204,21 @@ type candidatePath struct {
 	isMatchProp  bool
 }
 
+// Copied from TiDB.
+func compareColumnSet(l, r *intsets.Sparse) (int, bool) {
+	lLen, rLen := l.Len(), r.Len()
+	if lLen < rLen {
+		// -1 is meaningful only when l.SubsetOf(r) is true.
+		return -1, l.SubsetOf(r)
+	}
+	if lLen == rLen {
+		// 0 is meaningful only when l.SubsetOf(r) is true.
+		return 0, l.SubsetOf(r)
+	}
+	// 1 is meaningful only when r.SubsetOf(l) is true.
+	return 1, r.SubsetOf(l)
+}
+
 // compareCandidates is the core of skyline pruning. It compares the two candidate paths on three dimensions:
 // (1): the set of columns that occurred in the access condition,
 // (2): whether or not it matches the physical property
@@ -212,6 +227,33 @@ type candidatePath struct {
 // and there exists one factor that `x` is better than `y`, then `x` is better than `y`.
 func compareCandidates(lhs, rhs *candidatePath) int {
 	// TODO: implement the content according to the header comment.
+	lBetterProperties := 0
+	rBetterProperties := 0
+	setsResult, comparable := compareColumnSet(lhs.columnSet, rhs.columnSet)
+	if !comparable {
+		return 0
+	}
+
+	if setsResult > 0 {
+		lBetterProperties += 1
+	} else if setsResult < 0 {
+		rBetterProperties += 1
+	}
+	if lhs.isSingleScan && !rhs.isSingleScan {
+		lBetterProperties += 1
+	} else if !lhs.isSingleScan && rhs.isSingleScan {
+		rBetterProperties += 1
+	}
+	if lhs.isMatchProp && !rhs.isMatchProp {
+		lBetterProperties += 1
+	} else if !lhs.isMatchProp && rhs.isMatchProp {
+		rBetterProperties += 1
+	}
+	if lBetterProperties > 0 && rBetterProperties == 0 {
+		return 1
+	} else if lBetterProperties == 0 && rBetterProperties > 0 {
+		return -1
+	}
 	return 0
 }
 
@@ -274,7 +316,23 @@ func (ds *DataSource) skylinePruning(prop *property.PhysicalProperty) []*candida
 		// TODO: Here is the pruning phase. Will prune the access path which is must worse than others.
 		//       You'll need to implement the content in function `compareCandidates`.
 		//       And use it to prune unnecessary paths.
-		candidates = append(candidates, currentCandidate)
+		if len(candidates) > 0 {
+			prune := false
+			for i := len(candidates) - 1; i >= 0; i-- {
+				result := compareCandidates(candidates[i], currentCandidate)
+				if result == 1 {
+					prune = true
+					break
+				} else if result == -1 {
+					candidates = append(candidates[:i], candidates[i+1:]...)
+				}
+			}
+			if !prune {
+				candidates = append(candidates, currentCandidate)
+			}
+		} else {
+			candidates = append(candidates, currentCandidate)
+		}
 	}
 	return candidates
 }
